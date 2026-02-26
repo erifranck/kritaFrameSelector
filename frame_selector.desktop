@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=frame_selector
+X-Python-2-Compatible=false
+X-Krita-Manual=manual.html
+Name=Frame Selector
+Comment=Select and clone animation frames from the timeline to any position
