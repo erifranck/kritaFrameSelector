@@ -10,3 +10,12 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Build artifacts
+frame_selector.zip
+
+# Test/analysis files (extracted XMLs, test .kra files)
+*.kra
+maindoc_*.xml
+layer*_keyframes.xml
+maindoc_content.xml
