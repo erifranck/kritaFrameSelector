@@ -19,6 +19,7 @@ from .frame_store import FrameStore
 from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE
 from .thumbnail_cache import ThumbnailCache
 from .thumbnail_worker import ThumbnailWorker
+from .drawing_monitor import DrawingMonitor
 import os
 import zipfile
 
@@ -69,6 +70,11 @@ class FrameSelectorDocker(DockWidget):
             self._frame_manager, self._thumbnail_cache, parent=self
         )
         self._thumbnail_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
+
+        # Drawing monitor: polls the document composite and refreshes the
+        # thumbnail for any frame the user drew on, after they stop drawing.
+        self._drawing_monitor = DrawingMonitor(self._frame_manager, parent=self)
+        self._drawing_monitor.refresh_needed.connect(self._on_drawing_refresh)
 
         self._build_ui()
 
@@ -169,6 +175,7 @@ class FrameSelectorDocker(DockWidget):
 
         if not self._has_valid_context():
             self._thumbnail_worker.cancel()
+            self._drawing_monitor.deactivate()
             self._lbl_layer.setText("No document open")
             self._btn_refresh.setEnabled(False)
             self._btn_clear.setEnabled(False)
@@ -182,6 +189,7 @@ class FrameSelectorDocker(DockWidget):
         )
         self._btn_refresh.setEnabled(True)
         self._btn_clear.setEnabled(True)
+        self._drawing_monitor.activate()
         self._reload_grid()
 
     # ─── Grid ─────────────────────────────────────────────────────
@@ -209,7 +217,19 @@ class FrameSelectorDocker(DockWidget):
             self._set_status("No frames loaded · Click 'Refresh' to scan")
             return
 
+        frame_entries = []   # (frame_number, source_id) — drives cache + worker
+
         for frame_number in frames:
+            # source_id is the content-stable .kra XML reference.
+            # Fall back to a synthetic key for frames stored in old format.
+            source_id = (
+                self._frame_store.get_source_id(
+                    self._current_doc_name, self._current_layer_id, frame_number
+                )
+                or f"frame_{frame_number}"
+            )
+            frame_entries.append((frame_number, source_id))
+
             item = QListWidgetItem()
             item.setText(f"F {frame_number}")
             item.setToolTip(
@@ -219,18 +239,18 @@ class FrameSelectorDocker(DockWidget):
             item.setData(Qt.UserRole, frame_number)
             item.setSizeHint(QSize(CARD_SIZE, CARD_SIZE))
 
-            # Serve from cache immediately — no wait needed
+            # Serve from persistent cache immediately — no loading wait
             cached = self._thumbnail_cache.get(
-                self._current_doc_name, self._current_layer_id, frame_number
+                self._current_doc_name, self._current_layer_id, source_id
             )
             if cached:
                 item.setData(Qt.DecorationRole, cached)
 
             self._frame_grid.addItem(item)
 
-        # Queue only the frames that are not yet cached
+        # Queue only uncached frames for async sequential loading
         self._thumbnail_worker.request_thumbnails(
-            self._current_doc_name, self._current_layer_id, frames
+            self._current_doc_name, self._current_layer_id, frame_entries
         )
 
     def _on_thumbnail_ready(self, frame_number: int, pixmap):
@@ -240,6 +260,34 @@ class FrameSelectorDocker(DockWidget):
             if item and item.data(Qt.UserRole) == frame_number:
                 item.setData(Qt.DecorationRole, pixmap)
                 break
+
+    def _on_drawing_refresh(self, frame_number: int):
+        """Slot: called by DrawingMonitor after user finishes drawing.
+
+        Invalidates the cached thumbnail for the affected frame and
+        re-queues a single capture — no full Refresh scan needed.
+        """
+        if not self._has_valid_context():
+            return
+
+        source_id = (
+            self._frame_store.get_source_id(
+                self._current_doc_name, self._current_layer_id, frame_number
+            )
+            or f"frame_{frame_number}"
+        )
+
+        # Drop the stale entry from both memory and disk
+        self._thumbnail_cache.invalidate_entry(
+            self._current_doc_name, self._current_layer_id, source_id
+        )
+
+        # Re-generate just this one frame thumbnail asynchronously
+        self._thumbnail_worker.request_thumbnails(
+            self._current_doc_name,
+            self._current_layer_id,
+            [(frame_number, source_id)],
+        )
 
     # ─── Actions ──────────────────────────────────────────────────
 
@@ -323,12 +371,14 @@ class FrameSelectorDocker(DockWidget):
         for group in unique_frames_groups:
             # group = {'source_id': '...', 'times': [0, 5], 'representative_frame': 0}
             frame_num = group['representative_frame']
+            source_id  = group.get('source_id')
 
             self._frame_store.add_frame(
                 self._current_doc_name,
                 self._current_layer_id,
                 layer_name,
-                frame_number=frame_num
+                frame_number=frame_num,
+                source_id=source_id,
             )
             count += 1
 
