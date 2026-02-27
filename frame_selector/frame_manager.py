@@ -104,18 +104,54 @@ class FrameManager:
         parser = KritaParser(file_path)
         return parser.get_layer_clones()
 
-    def get_frame_thumbnail(self, frame_number: int, size: QSize = None) -> QPixmap | None:
+    def get_node_by_uuid(self, uuid: str) -> "Node | None":
+        """Find any node in the document by its UUID string.
+
+        Comparison is normalised (braces stripped, lowercase) so that UUIDs
+        from the Krita API (e.g. '{AbCd...}') always match those read from
+        the .kra XML (e.g. '{abcd...}'), regardless of casing or brace style.
+        """
+        doc = self.active_document
+        if not doc:
+            return None
+
+        target = uuid.strip("{}").lower()
+
+        def _find(node):
+            if node.uniqueId().toString().strip("{}").lower() == target:
+                return node
+            for child in node.childNodes():
+                result = _find(child)
+                if result:
+                    return result
+            return None
+
+        return _find(doc.rootNode())
+
+    def get_frame_thumbnail(
+        self, frame_number: int, node=None, size: QSize = None
+    ) -> "QPixmap | None":
         """
         Generate a thumbnail for a specific frame.
 
-        Navigates to the frame, forces a projection refresh so Krita's
-        rendering engine catches up before reading pixel data.
+        Navigates to the frame then polls Krita's projection in a retry loop
+        until the node reports non-empty bounds — without this the projection
+        is often stale on the first processEvents() call, producing a blank
+        thumbnail (shown as '?' in the grid).
+
+        Args:
+            frame_number: Timeline position to capture.
+            node:         Layer node to capture. Defaults to the active node.
+            size:         Output size. Defaults to THUMBNAIL_SIZE.
 
         Caching is handled externally by ThumbnailCache / ThumbnailWorker.
         """
         doc = self.active_document
-        node = self.active_node
-        if not doc or not node:
+        if not doc:
+            return None
+
+        target_node = node if node is not None else self.active_node
+        if not target_node:
             return None
 
         target_size = size or THUMBNAIL_SIZE
@@ -123,16 +159,24 @@ class FrameManager:
 
         try:
             doc.setCurrentTime(frame_number)
-            # Force Krita's rendering pipeline to update for the new time
-            # before we read pixel data — without this the projection is stale.
-            doc.refreshProjection()
-            QApplication.processEvents()
 
-            bounds = node.bounds()
-            if bounds.isEmpty():
+            # Poll until Krita's rendering pipeline delivers valid bounds.
+            # One processEvents() call is not enough for some frames — we
+            # keep refreshing until bounds become non-empty or we give up.
+            MAX_RETRIES = 12
+            bounds = None
+            for _ in range(MAX_RETRIES):
+                doc.refreshProjection()
+                QApplication.processEvents()
+                b = target_node.bounds()
+                if not b.isEmpty():
+                    bounds = b
+                    break
+
+            if bounds is None:
                 return None
 
-            pixel_data = node.projectionPixelData(
+            pixel_data = target_node.projectionPixelData(
                 bounds.x(), bounds.y(),
                 bounds.width(), bounds.height()
             )

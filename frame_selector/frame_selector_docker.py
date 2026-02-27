@@ -10,7 +10,7 @@ from krita import DockWidget
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel,
-    QPushButton, QApplication, QMessageBox
+    QPushButton, QApplication,
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 
@@ -20,8 +20,6 @@ from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE
 from .thumbnail_cache import ThumbnailCache
 from .thumbnail_worker import ThumbnailWorker
 from .drawing_monitor import DrawingMonitor
-import os
-import zipfile
 
 
 class FrameSelectorDocker(DockWidget):
@@ -56,6 +54,13 @@ class FrameSelectorDocker(DockWidget):
         self._current_layer_id: str | None = None
         self._current_layer_name: str | None = None
 
+        # Layer change monitor: polls the active layer to detect when user
+        # switches to a different layer in Krita's layer panel.
+        self._layer_polling_timer = QTimer()
+        self._layer_polling_timer.setSingleShot(False)
+        self._layer_polling_timer.setInterval(500)  # Check every 500ms
+        self._layer_polling_timer.timeout.connect(self._check_layer_change)
+
         # Debounce for canvas changes
         self._refresh_timer = QTimer()
         self._refresh_timer.setSingleShot(True)
@@ -75,6 +80,9 @@ class FrameSelectorDocker(DockWidget):
         # thumbnail for any frame the user drew on, after they stop drawing.
         self._drawing_monitor = DrawingMonitor(self._frame_manager, parent=self)
         self._drawing_monitor.refresh_needed.connect(self._on_drawing_refresh)
+
+        # Start layer monitoring immediately (will do nothing if no document)
+        self._layer_polling_timer.start()
 
         self._build_ui()
 
@@ -162,6 +170,56 @@ class FrameSelectorDocker(DockWidget):
         self._current_layer_id = self._frame_manager.get_layer_id()
         self._current_layer_name = self._frame_manager.get_layer_name()
 
+    def _check_layer_change(self):
+        """Poll active layer to detect when user switches layers.
+
+        When the active layer changes, reload the grid to show frames
+        from the newly selected layer.
+        """
+        # If no valid context, try to establish one now
+        if not self._has_valid_context():
+            self._update_context()
+            if not self._has_valid_context():
+                return  # Still no document/layer
+            
+            # New document opened - trigger full context change
+            self._on_context_changed()
+            return
+
+        # Get current layer info
+        current_layer_id = self._frame_manager.get_layer_id()
+        
+        # If we have a stored layer ID but current returns None, ignore (document closing)
+        if current_layer_id is None:
+            return
+
+        # Check if layer changed
+        # - First time: _current_layer_id is None, current_layer_id has value
+        # - Changing layers: both have values but different
+        if current_layer_id != self._current_layer_id:
+            # Layer changed - update context and reload
+            current_layer_name = self._frame_manager.get_layer_name()
+            self._current_layer_id = current_layer_id
+            self._current_layer_name = current_layer_name
+
+            # Update the label
+            display_name = current_layer_name or "unnamed"
+            self._lbl_layer.setText(
+                f"{self._current_doc_name} · {display_name}"
+            )
+
+            # Reload grid for new layer
+            self._reload_grid()
+
+            # Update status based on whether we have frames
+            frames = self._frame_store.get_frames(
+                self._current_doc_name, self._current_layer_id
+            )
+            if frames:
+                self._set_status(f"Showing {len(frames)} frame(s) from layer '{current_layer_name}'", "#6fbf73")
+            else:
+                self._set_status("No frames for this layer · Click 'Refresh' to scan", "#e8a838")
+
     def _has_valid_context(self) -> bool:
         """Check if we have a valid document + layer."""
         return (
@@ -176,6 +234,7 @@ class FrameSelectorDocker(DockWidget):
         if not self._has_valid_context():
             self._thumbnail_worker.cancel()
             self._drawing_monitor.deactivate()
+            self._layer_polling_timer.stop()
             self._lbl_layer.setText("No document open")
             self._btn_refresh.setEnabled(False)
             self._btn_clear.setEnabled(False)
@@ -190,6 +249,7 @@ class FrameSelectorDocker(DockWidget):
         self._btn_refresh.setEnabled(True)
         self._btn_clear.setEnabled(True)
         self._drawing_monitor.activate()
+        self._layer_polling_timer.start()  # Start monitoring layer changes
         self._reload_grid()
 
     # ─── Grid ─────────────────────────────────────────────────────
@@ -217,8 +277,6 @@ class FrameSelectorDocker(DockWidget):
             self._set_status("No frames loaded · Click 'Refresh' to scan")
             return
 
-        frame_entries = []   # (frame_number, source_id) — drives cache + worker
-
         for frame_number in frames:
             # source_id is the content-stable .kra XML reference.
             # Fall back to a synthetic key for frames stored in old format.
@@ -228,7 +286,6 @@ class FrameSelectorDocker(DockWidget):
                 )
                 or f"frame_{frame_number}"
             )
-            frame_entries.append((frame_number, source_id))
 
             item = QListWidgetItem()
             item.setText(f"F {frame_number}")
@@ -239,7 +296,7 @@ class FrameSelectorDocker(DockWidget):
             item.setData(Qt.UserRole, frame_number)
             item.setSizeHint(QSize(CARD_SIZE, CARD_SIZE))
 
-            # Serve from persistent cache immediately — no loading wait
+            # Serve from persistent cache immediately — no generation needed
             cached = self._thumbnail_cache.get(
                 self._current_doc_name, self._current_layer_id, source_id
             )
@@ -248,13 +305,25 @@ class FrameSelectorDocker(DockWidget):
 
             self._frame_grid.addItem(item)
 
-        # Queue only uncached frames for async sequential loading
-        self._thumbnail_worker.request_thumbnails(
-            self._current_doc_name, self._current_layer_id, frame_entries
-        )
+        # No auto-generation on context change or startup.
+        # Thumbnails are only generated when:
+        #   1. User clicks "Refresh"  → _on_refresh_frames triggers the worker
+        #   2. User finishes drawing  → _on_drawing_refresh triggers the worker
 
-    def _on_thumbnail_ready(self, frame_number: int, pixmap):
-        """Slot: called by ThumbnailWorker when a thumbnail is generated."""
+    def _on_thumbnail_ready(
+        self, doc_name: str, layer_id: str, frame_number: int, pixmap
+    ):
+        """Slot: called by ThumbnailWorker when a thumbnail is generated.
+
+        Only updates the grid when the signal matches the currently displayed
+        layer — other layers' thumbnails are persisted to cache silently.
+        """
+        if (
+            doc_name != self._current_doc_name
+            or layer_id != self._current_layer_id
+        ):
+            return
+
         for i in range(self._frame_grid.count()):
             item = self._frame_grid.item(i)
             if item and item.data(Qt.UserRole) == frame_number:
@@ -284,106 +353,133 @@ class FrameSelectorDocker(DockWidget):
 
         # Re-generate just this one frame thumbnail asynchronously
         self._thumbnail_worker.request_thumbnails(
-            self._current_doc_name,
-            self._current_layer_id,
-            [(frame_number, source_id)],
+            [(self._current_doc_name, self._current_layer_id, frame_number, source_id)]
         )
 
     # ─── Actions ──────────────────────────────────────────────────
 
     def _on_refresh_frames(self):
-        """Scan document structure and populate frames automatically."""
+        """Scan ALL animated layers and queue thumbnails for every frame.
+
+        Stores frame positions and thumbnails persistently so they survive
+        Krita restarts.  The grid only shows the active layer, but all other
+        layers are scanned and cached in the background so switching layers
+        shows thumbnails instantly without another Refresh.
+
+        UUID resolution
+        ───────────────
+        The .kra XML stores layer UUIDs in a format that may differ from
+        what Krita's Python API returns (braces, casing).  We resolve each
+        XML UUID to the canonical API UUID via get_node_by_uuid (which
+        normalises before comparing) so every key — store, cache, signal
+        filter — uses the same format.
+
+        Smart cache diff
+        ────────────────
+        Instead of wiping the entire layer cache on every Refresh, we only
+        evict source_ids that no longer exist in the scan result.  Unchanged
+        source_ids keep their disk PNGs, and request_thumbnails() skips them
+        via its has() check, so a second Refresh is essentially free.
+        """
         if not self._has_valid_context():
             return
 
-        self._set_status("Scanning document... (Saving)", "#8888cc")
-        # Force UI update
+        self._set_status("Scanning document… (Saving)", "#8888cc")
         QApplication.processEvents()
 
-        # 1. Scan document (this saves the file!)
+        # Save + parse the .kra ZIP — returns data keyed by XML-format UUIDs
         layer_data = self._frame_manager.scan_active_document(force_save=True)
 
-        # 2. Filter for current layer
-        current_layer_uuid = self._current_layer_id
-
-        # Strip {} from uuid if present in API but not in XML (unlikely now)
-        if current_layer_uuid and current_layer_uuid.startswith('{'):
-            pass
-
-        if not layer_data or current_layer_uuid not in layer_data:
-            # DEBUG: Popup info if scan fails
-            try:
-                doc_path = self._frame_manager.active_document.fileName()
-                exists = os.path.exists(doc_path)
-                
-                debug_info = f"File: {doc_path}\nExists: {exists}\n"
-                debug_info += f"API Layer UUID: {current_layer_uuid}\n\n"
-                
-                if exists:
-                    try:
-                        with zipfile.ZipFile(doc_path, 'r') as z:
-                            # Contar archivos
-                            files = z.namelist()
-                            debug_info += f"Zip Files: {len(files)}\n"
-                            
-                            # Buscar maindoc.xml
-                            if "maindoc.xml" in files:
-                                debug_info += "Maindoc: Found\n"
-                            else:
-                                debug_info += "Maindoc: MISSING!\n"
-                            
-                            # Buscar keyframes
-                            kfs = [f for f in files if f.endswith(".keyframes.xml")]
-                            debug_info += f"Keyframe files: {len(kfs)}\n"
-                            
-                            # Mostrar UUIDs encontrados si pudimos parsear
-                            found_uuids = list(layer_data.keys())
-                            debug_info += f"Found UUIDs: {found_uuids}"
-                            
-                    except Exception as e:
-                        debug_info += f"Zip Error: {e}\n"
-                
-                QMessageBox.warning(self, "Debug Info", debug_info)
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Error Fatal", str(e))
-                
-            self._set_status("Scan failed (Check Popup)", "#e85555")
+        if not layer_data:
+            self._set_status("No animated layers found", "#e85555")
             return
 
-        unique_frames_groups = layer_data[current_layer_uuid]['clones']
+        all_entries = []   # (doc_name, canonical_uuid, frame_number, source_id)
+        total_unique = 0
+        current_layer_count = 0
 
-        if not unique_frames_groups:
-            self._set_status("No content frames found (all empty?)", "#e8a838")
-            return
-
-        # 3. Update Store — drop stale thumbnails before rebuilding
-        self._thumbnail_cache.invalidate(
-            self._current_doc_name, self._current_layer_id
-        )
-        self._frame_store.clear_frames(
-            self._current_doc_name, self._current_layer_id
-        )
-
-        count = 0
-        layer_name = self._current_layer_name or "unnamed"
-
-        for group in unique_frames_groups:
-            # group = {'source_id': '...', 'times': [0, 5], 'representative_frame': 0}
-            frame_num = group['representative_frame']
-            source_id  = group.get('source_id')
-
-            self._frame_store.add_frame(
-                self._current_doc_name,
-                self._current_layer_id,
-                layer_name,
-                frame_number=frame_num,
-                source_id=source_id,
+        for xml_uuid, layer_info in layer_data.items():
+            # ── UUID resolution ──────────────────────────────────────────────
+            # get_node_by_uuid uses normalised comparison so it finds the node
+            # even when XML and API formats differ (e.g. brace/casing mismatch).
+            node = self._frame_manager.get_node_by_uuid(xml_uuid)
+            canonical_uuid = (
+                node.uniqueId().toString() if node else xml_uuid
             )
-            count += 1
 
+            # ── Smart cache diff ─────────────────────────────────────────────
+            # Collect source_ids that are still valid after this scan.
+            new_source_ids = {
+                grp.get('source_id') or f"frame_{grp['representative_frame']}"
+                for grp in layer_info['clones']
+            }
+            # Evict only source_ids that disappeared (content was deleted/merged).
+            old_source_ids = {
+                self._frame_store.get_source_id(
+                    self._current_doc_name, canonical_uuid, fn
+                )
+                for fn in self._frame_store.get_frames(
+                    self._current_doc_name, canonical_uuid
+                )
+            } - {None}
+
+            for stale_sid in old_source_ids - new_source_ids:
+                self._thumbnail_cache.invalidate_entry(
+                    self._current_doc_name, canonical_uuid, stale_sid
+                )
+
+            # ── Rebuild store ────────────────────────────────────────────────
+            self._frame_store.clear_frames(self._current_doc_name, canonical_uuid)
+            layer_name = layer_info.get('layer_name', 'unnamed')
+
+            for group in layer_info['clones']:
+                frame_num = group['representative_frame']
+                source_id = group.get('source_id') or f"frame_{frame_num}"
+
+                self._frame_store.add_frame(
+                    self._current_doc_name,
+                    canonical_uuid,
+                    layer_name,
+                    frame_number=frame_num,
+                    source_id=source_id,
+                )
+                all_entries.append(
+                    (self._current_doc_name, canonical_uuid, frame_num, source_id)
+                )
+                total_unique += 1
+
+            if canonical_uuid == self._current_layer_id:
+                current_layer_count = len(layer_info['clones'])
+
+        # Reload the grid (now using canonical UUIDs that match _current_layer_id)
         self._reload_grid()
-        self._set_status(f"Found {count} unique frames", "#6fbf73")
+
+        # Queue thumbnail generation.  Entries already in the cache (disk or
+        # memory) are skipped by request_thumbnails()'s has() check, so only
+        # genuinely new or evicted thumbnails are regenerated.
+        self._thumbnail_worker.request_thumbnails(all_entries)
+
+        other_layers = len({
+            lid for dn, lid, fn, sid in all_entries
+            if lid != self._current_layer_id
+        })
+
+        if current_layer_count == 0:
+            self._set_status(
+                f"Active layer has no frames · "
+                f"{total_unique} frame(s) across {other_layers} other layer(s)",
+                "#e8a838"
+            )
+        else:
+            suffix = (
+                f" · {total_unique - current_layer_count} more in "
+                f"{other_layers} other layer(s)"
+                if other_layers > 0
+                else ""
+            )
+            self._set_status(
+                f"Found {current_layer_count} unique frame(s){suffix}", "#6fbf73"
+            )
 
     def _on_clear_frames(self):
         """Clear all registered frames for the current layer."""
