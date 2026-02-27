@@ -10,6 +10,8 @@ A Krita plugin that lets animators **reuse frames** across the timeline with one
 ![Python 3](https://img.shields.io/badge/Python-3-green)
 ![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-orange)
 
+![Frame Selector Docker panel](public/DockerScreenShot.png)
+
 ---
 
 ## Why Frame Selector?

@@ -10,6 +10,8 @@ Un plugin para Krita que permite a los animadores **reutilizar frames** a lo lar
 ![Python 3](https://img.shields.io/badge/Python-3-green)
 ![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-orange)
 
+![Panel Docker de Frame Selector](public/DockerScreenShot.png)
+
 ---
 
 ## \u00bfPor qu\u00e9 Frame Selector?
