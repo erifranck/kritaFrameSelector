@@ -104,18 +104,18 @@ After running the script, restart Krita and enable the plugin in **Settings > Co
 
 ```
 KritaFrameSelector/
-\u251c\u2500\u2500 frame_selector/                  # Plugin package
-\u2502   \u251c\u2500\u2500 __init__.py                  # Krita plugin entry point
-\u2502   \u251c\u2500\u2500 frame_manager.py             # Frame scanning & smart cloning logic
-\u2502   \u251c\u2500\u2500 frame_selector_docker.py     # Docker panel UI (Qt)
-\u2502   \u251c\u2500\u2500 frame_store.py               # Persistent JSON storage for registered frames
-\u2502   \u251c\u2500\u2500 frame_thumbnail_delegate.py  # Custom card rendering for frame thumbnails
-\u2502   \u251c\u2500\u2500 krita_parser.py              # .kra file forensic analyzer (ZIP/XML parsing)
-\u2502   \u2514\u2500\u2500 manual.html                  # Plugin manual
-\u251c\u2500\u2500 frame_selector.desktop           # Krita plugin descriptor
-\u251c\u2500\u2500 install.sh                       # Developer installation script
-\u251c\u2500\u2500 README.md                        # This file
-\u2514\u2500\u2500 README_ES.md                     # Spanish version
+├── frame_selector/                  # Plugin package
+│   ├── __init__.py                  # Krita plugin entry point
+│   ├── frame_manager.py             # Frame scanning & smart cloning logic
+│   ├── frame_selector_docker.py     # Docker panel UI (Qt)
+│   ├── frame_store.py               # Persistent JSON storage for registered frames
+│   ├── frame_thumbnail_delegate.py  # Custom card rendering for frame thumbnails
+│   ├── krita_parser.py              # .kra file forensic analyzer (ZIP/XML parsing)
+│   └── manual.html                  # Plugin manual
+├── frame_selector.desktop           # Krita plugin descriptor
+├── install.sh                       # Developer installation script
+├── README.md                        # This file
+└── README_ES.md                     # Spanish version
 ```
 
 ---

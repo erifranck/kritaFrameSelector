@@ -104,18 +104,18 @@ Despu\u00e9s de ejecutar el script, reinici\u00e1 Krita y activ\u00e1 el plugin 
 
 ```
 KritaFrameSelector/
-\u251c\u2500\u2500 frame_selector/                  # Paquete del plugin
-\u2502   \u251c\u2500\u2500 __init__.py                  # Entry point del plugin para Krita
-\u2502   \u251c\u2500\u2500 frame_manager.py             # L\u00f3gica de escaneo de frames y clonaci\u00f3n inteligente
-\u2502   \u251c\u2500\u2500 frame_selector_docker.py     # UI del panel Docker (Qt)
-\u2502   \u251c\u2500\u2500 frame_store.py               # Almacenamiento persistente en JSON para frames registrados
-\u2502   \u251c\u2500\u2500 frame_thumbnail_delegate.py  # Renderizado personalizado de tarjetas con miniaturas
-\u2502   \u251c\u2500\u2500 krita_parser.py              # Analizador forense de archivos .kra (parseo ZIP/XML)
-\u2502   \u2514\u2500\u2500 manual.html                  # Manual del plugin
-\u251c\u2500\u2500 frame_selector.desktop           # Descriptor del plugin para Krita
-\u251c\u2500\u2500 install.sh                       # Script de instalaci\u00f3n para desarrolladores
-\u251c\u2500\u2500 README.md                        # Versi\u00f3n en ingl\u00e9s
-\u2514\u2500\u2500 README_ES.md                     # Este archivo
+├── frame_selector/                  # Paquete del plugin
+│   ├── __init__.py                  # Entry point del plugin para Krita
+│   ├── frame_manager.py             # Lógica de escaneo de frames y clonación inteligente
+│   ├── frame_selector_docker.py     # UI del panel Docker (Qt)
+│   ├── frame_store.py               # Almacenamiento persistente en JSON para frames registrados
+│   ├── frame_thumbnail_delegate.py  # Renderizado personalizado de tarjetas con miniaturas
+│   ├── krita_parser.py              # Analizador forense de archivos .kra (parseo ZIP/XML)
+│   └── manual.html                  # Manual del plugin
+├── frame_selector.desktop           # Descriptor del plugin para Krita
+├── install.sh                       # Script de instalación para desarrolladores
+├── README.md                        # Versión en inglés
+└── README_ES.md                     # Este archivo
 ```
 
 ---
