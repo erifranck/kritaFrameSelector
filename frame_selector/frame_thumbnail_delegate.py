@@ -1,11 +1,11 @@
 """
 Custom QStyledItemDelegate for rendering frame cards in a grid.
-Each card shows a thumbnail preview, frame label, and a remove button.
+Each card shows a thumbnail preview and frame label.
 """
 
 from PyQt5.QtWidgets import QStyledItemDelegate, QStyle
 from PyQt5.QtGui import QPainter, QPixmap, QColor, QFont, QPen, QBrush
-from PyQt5.QtCore import Qt, QRect, QSize, QModelIndex, QRectF, QPoint
+from PyQt5.QtCore import Qt, QRect, QSize, QModelIndex, QRectF
 
 # Card layout constants
 CARD_SIZE = 120
@@ -13,17 +13,16 @@ CARD_PADDING = 6
 LABEL_HEIGHT = 22
 THUMB_PADDING = 4
 CORNER_RADIUS = 6
-REMOVE_BTN_SIZE = 18
 
-# Custom data role to flag remove button hit
+# Custom data role to flag remove button hit (Legacy - not used but kept for compat)
 REMOVE_ROLE = Qt.UserRole + 1
 
 
 class FrameCardDelegate(QStyledItemDelegate):
     """
-    Renders each frame as a grid card with a remove button:
+    Renders each frame as a grid card:
 
-    ┌──────────────[×]┐
+    ┌─────────────────┐
     │                 │
     │   thumbnail     │
     │    preview      │
@@ -33,7 +32,6 @@ class FrameCardDelegate(QStyledItemDelegate):
     └─────────────────┘
 
     - Single click on card = clone to current timeline position
-    - Click [×] = remove this frame from the registry
     """
 
     def __init__(self, parent=None):
@@ -48,21 +46,9 @@ class FrameCardDelegate(QStyledItemDelegate):
         self._thumb_bg = QColor(255, 255, 255)
         self._text_color = QColor(210, 210, 215)
         self._text_muted = QColor(140, 140, 145)
-        self._remove_bg = QColor(180, 50, 50)
-        self._remove_bg_hover = QColor(220, 70, 70)
-        self._remove_text = QColor(255, 255, 255)
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
         return QSize(CARD_SIZE, CARD_SIZE)
-
-    def _get_remove_btn_rect(self, card_rect: QRect) -> QRect:
-        """Calculate the remove button rect relative to the card."""
-        return QRect(
-            card_rect.right() - REMOVE_BTN_SIZE - 2,
-            card_rect.y() + 2,
-            REMOVE_BTN_SIZE,
-            REMOVE_BTN_SIZE
-        )
 
     def paint(self, painter: QPainter, option, index: QModelIndex):
         painter.save()
@@ -142,43 +128,4 @@ class FrameCardDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.drawText(label_rect, Qt.AlignCenter | Qt.AlignVCenter, label)
 
-        # ── Remove button (only on hover) ──
-        if is_hovered:
-            btn_rect = self._get_remove_btn_rect(rect)
-            btn_rectf = QRectF(btn_rect)
-
-            painter.setBrush(QBrush(self._remove_bg))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(btn_rectf, 3, 3)
-
-            painter.setPen(self._remove_text)
-            font = QFont()
-            font.setPixelSize(12)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(btn_rect, Qt.AlignCenter, "×")
-
         painter.restore()
-
-    def editorEvent(self, event, model, option, index):
-        """
-        Intercept mouse clicks on the remove button.
-
-        If the click lands on the [×], we set a flag on the item
-        via REMOVE_ROLE so the Docker knows to remove instead of clone.
-        """
-        from PyQt5.QtCore import QEvent
-
-        if event.type() == QEvent.MouseButtonRelease:
-            rect = option.rect.adjusted(
-                CARD_PADDING, CARD_PADDING,
-                -CARD_PADDING, -CARD_PADDING
-            )
-            btn_rect = self._get_remove_btn_rect(rect)
-
-            if btn_rect.contains(event.pos()):
-                # Signal removal by setting the REMOVE_ROLE flag
-                model.setData(index, True, REMOVE_ROLE)
-                return True
-
-        return super().editorEvent(event, model, option, index)

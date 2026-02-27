@@ -1,9 +1,8 @@
 """
 Frame Selector Docker - Main UI Panel.
 
-Grid of user-registered frame cards. The user explicitly adds
-frames they want available for cloning. Click a card to clone
-that frame to the current timeline position. Click [×] to remove.
+Grid of automatically detected unique frames.
+Click a card to clone that frame to the current timeline position.
 """
 
 from krita import DockWidget
@@ -11,39 +10,36 @@ from krita import DockWidget
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel,
-    QPushButton, QApplication, QMessageBox  # <--- Agregamos QMessageBox
+    QPushButton, QApplication, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 
 from .frame_manager import FrameManager
 from .frame_store import FrameStore
-from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE, REMOVE_ROLE
+from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE
 import os
 import zipfile
 
 
 class FrameSelectorDocker(DockWidget):
     """
-    Docker widget: user-managed grid of frame cards.
+    Docker widget: auto-populated grid of unique frame content.
 
     ┌────────────────────────────────────┐
     │  doc.kra · walk_cycle              │
     ├────────────────────────────────────┤
-    │  [+ Add]  [↻ Refresh]  [Clear]     │
+    │  [↻ Refresh]          [Clear]      │
     ├────────────────────────────────────┤
-    │  ┌─────[×]┐ ┌─────[×]┐            │
-    │  │  F0    │ │  F6    │            │
-    │  └────────┘ └────────┘            │
+    │  ┌──────────┐ ┌──────────┐         │
+    │  │  F0      │ │  F6      │         │
+    │  └──────────┘ └──────────┘         │
     ├────────────────────────────────────┤
-    │  2 frames · Click to clone         │
+    │  2 unique frames found             │
     └────────────────────────────────────┘
 
-    - "Add Frame": registers the current playhead frame
-    - "Refresh": scans .kra file to find real unique frames (auto-populate)
-    - "Clear Frames": removes all registered frames for this layer
+    - "Refresh": scans .kra file to find real unique frames
+    - "Clear": removes all registered frames for this layer from view
     - Click a card: clones that frame to current playhead position
-    - Click [×]: removes that frame from the registry
-    - Data persists per document + layer UUID
     """
 
     def __init__(self):
@@ -85,26 +81,13 @@ class FrameSelectorDocker(DockWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(4)
 
-        self._btn_add = QPushButton("+ Add")
-        self._btn_add.setToolTip(
-            "Register the current playhead frame for cloning"
-        )
-        self._btn_add.setStyleSheet(
-            "QPushButton { background-color: #3a6b35; color: white; "
-            "padding: 6px 12px; border-radius: 3px; font-weight: bold; }"
-            "QPushButton:hover { background-color: #4a8b45; }"
-            "QPushButton:disabled { background-color: #333; color: #666; }"
-        )
-        self._btn_add.clicked.connect(self._on_add_frame)
-        btn_row.addWidget(self._btn_add)
-
         self._btn_refresh = QPushButton("↻ Refresh")
         self._btn_refresh.setToolTip(
-            "Scan document for real unique frames (saves document)"
+            "Scan document to find unique frames (Saves document!)"
         )
         self._btn_refresh.setStyleSheet(
             "QPushButton { background-color: #3a506b; color: white; "
-            "padding: 6px 12px; border-radius: 3px; }"
+            "padding: 6px 12px; border-radius: 3px; font-weight: bold; }"
             "QPushButton:hover { background-color: #4a608b; }"
             "QPushButton:disabled { background-color: #333; color: #666; }"
         )
@@ -113,12 +96,12 @@ class FrameSelectorDocker(DockWidget):
 
         self._btn_clear = QPushButton("Clear")
         self._btn_clear.setToolTip(
-            "Remove all registered frames for this layer"
+            "Clear current view (does not delete frames from file)"
         )
         self._btn_clear.setStyleSheet(
-            "QPushButton { background-color: #6b3535; color: white; "
+            "QPushButton { background-color: #444; color: #ccc; "
             "padding: 6px 12px; border-radius: 3px; }"
-            "QPushButton:hover { background-color: #8b4545; }"
+            "QPushButton:hover { background-color: #555; color: white; }"
             "QPushButton:disabled { background-color: #333; color: #666; }"
         )
         self._btn_clear.clicked.connect(self._on_clear_frames)
@@ -143,13 +126,10 @@ class FrameSelectorDocker(DockWidget):
         )
         self._frame_grid.itemClicked.connect(self._on_card_clicked)
 
-        # Listen for data changes (remove button sets REMOVE_ROLE)
-        self._frame_grid.model().dataChanged.connect(self._on_data_changed)
-
         layout.addWidget(self._frame_grid, stretch=1)
 
         # ── Status bar ──
-        self._status_label = QLabel("Add frames to get started")
+        self._status_label = QLabel("Click 'Refresh' to scan frames")
         self._status_label.setAlignment(Qt.AlignCenter)
         self._status_label.setStyleSheet(
             "color: #888; font-size: 11px; padding: 4px; "
@@ -178,7 +158,6 @@ class FrameSelectorDocker(DockWidget):
 
         if not self._has_valid_context():
             self._lbl_layer.setText("No document open")
-            self._btn_add.setEnabled(False)
             self._btn_refresh.setEnabled(False)
             self._btn_clear.setEnabled(False)
             self._frame_grid.clear()
@@ -189,7 +168,6 @@ class FrameSelectorDocker(DockWidget):
         self._lbl_layer.setText(
             f"{self._current_doc_name} · {display_name}"
         )
-        self._btn_add.setEnabled(True)
         self._btn_refresh.setEnabled(True)
         self._btn_clear.setEnabled(True)
         self._reload_grid()
@@ -209,7 +187,7 @@ class FrameSelectorDocker(DockWidget):
 
         if not frames:
             self._set_status(
-                "No frames registered · Click '+ Add' or 'Refresh'")
+                "No frames loaded · Click 'Refresh' to scan")
             return
 
         for frame_number in frames:
@@ -217,7 +195,7 @@ class FrameSelectorDocker(DockWidget):
             item.setText(f"F {frame_number}")
             item.setToolTip(
                 f"Frame {frame_number}\n"
-                f"Click to clone · [×] to remove"
+                f"Click to clone to current position"
             )
             item.setData(Qt.UserRole, frame_number)
             item.setSizeHint(QSize(CARD_SIZE, CARD_SIZE))
@@ -230,33 +208,10 @@ class FrameSelectorDocker(DockWidget):
 
         current_time = self._frame_manager.get_current_time()
         self._set_status(
-            f"{len(frames)} frames · Position: {current_time} · Click to clone"
+            f"{len(frames)} unique frames · Click to clone"
         )
 
     # ─── Actions ──────────────────────────────────────────────────
-
-    def _on_add_frame(self):
-        """Register the current playhead frame."""
-        if not self._has_valid_context():
-            return
-
-        current_time = self._frame_manager.get_current_time()
-        layer_name = self._current_layer_name or "unnamed"
-
-        added = self._frame_store.add_frame(
-            self._current_doc_name,
-            self._current_layer_id,
-            layer_name,
-            current_time
-        )
-
-        if added:
-            self._reload_grid()
-            self._set_status(f"Frame {current_time} registered", "#6fbf73")
-        else:
-            self._set_status(
-                f"Frame {current_time} already registered", "#e8a838"
-            )
 
     def _on_refresh_frames(self):
         """Scan document structure and populate frames automatically."""
@@ -273,52 +228,48 @@ class FrameSelectorDocker(DockWidget):
         # 2. Filter for current layer
         current_layer_uuid = self._current_layer_id
 
-        # Strip {} from uuid if present, Krita sometimes includes them
+        # Strip {} from uuid if present in API but not in XML (unlikely now)
         if current_layer_uuid and current_layer_uuid.startswith('{'):
-            # Standardize UUID format just in case
             pass
 
         if not layer_data or current_layer_uuid not in layer_data:
-            # DEBUG: Si falla, mostramos popup con toda la info
+            # DEBUG: Popup info if scan fails
             try:
                 doc_path = self._frame_manager.active_document.fileName()
                 exists = os.path.exists(doc_path)
-
+                
                 debug_info = f"File: {doc_path}\nExists: {exists}\n"
                 debug_info += f"API Layer UUID: {current_layer_uuid}\n\n"
-
+                
                 if exists:
                     try:
                         with zipfile.ZipFile(doc_path, 'r') as z:
                             # Contar archivos
                             files = z.namelist()
                             debug_info += f"Zip Files: {len(files)}\n"
-
+                            
                             # Buscar maindoc.xml
                             if "maindoc.xml" in files:
                                 debug_info += "Maindoc: Found\n"
                             else:
                                 debug_info += "Maindoc: MISSING!\n"
-
+                            
                             # Buscar keyframes
-                            kfs = [f for f in files if f.endswith(
-                                ".keyframes.xml")]
+                            kfs = [f for f in files if f.endswith(".keyframes.xml")]
                             debug_info += f"Keyframe files: {len(kfs)}\n"
-
+                            
                             # Mostrar UUIDs encontrados si pudimos parsear
                             found_uuids = list(layer_data.keys())
                             debug_info += f"Found UUIDs: {found_uuids}"
-
+                            
                     except Exception as e:
                         debug_info += f"Zip Error: {e}\n"
-
-                # Mostrar el popup
+                
                 QMessageBox.warning(self, "Debug Info", debug_info)
-
+                
             except Exception as e:
-                # Si todo explota, mostrar eso
                 QMessageBox.critical(self, "Error Fatal", str(e))
-
+                
             self._set_status("Scan failed (Check Popup)", "#e85555")
             return
 
@@ -329,7 +280,7 @@ class FrameSelectorDocker(DockWidget):
             return
 
         # 3. Update Store
-        # Clear old manual frames
+        # Clear old frames
         self._frame_store.clear_frames(
             self._current_doc_name, self._current_layer_id
         )
@@ -365,12 +316,6 @@ class FrameSelectorDocker(DockWidget):
 
     def _on_card_clicked(self, item: QListWidgetItem):
         """Clone the clicked frame to the current timeline position."""
-        # Check if remove flag was set by the delegate
-        if item.data(REMOVE_ROLE):
-            # Clear the flag and skip — removal handled by _on_data_changed
-            item.setData(REMOVE_ROLE, None)
-            return
-
         frame_number = item.data(Qt.UserRole)
         if frame_number is None:
             return
@@ -396,32 +341,6 @@ class FrameSelectorDocker(DockWidget):
         else:
             self._set_status(
                 f"Failed to clone frame {frame_number}", "#e85555"
-            )
-
-    def _on_data_changed(self, top_left, bottom_right, roles):
-        """Handle data changes from the delegate (remove button)."""
-        if REMOVE_ROLE not in roles:
-            return
-
-        if not self._has_valid_context():
-            return
-
-        index = top_left
-        frame_number = index.data(Qt.UserRole)
-
-        if frame_number is None:
-            return
-
-        removed = self._frame_store.remove_frame(
-            self._current_doc_name,
-            self._current_layer_id,
-            frame_number
-        )
-
-        if removed:
-            self._reload_grid()
-            self._set_status(
-                f"Frame {frame_number} removed", "#e8a838"
             )
 
     # ─── UI Helpers ───────────────────────────────────────────────
