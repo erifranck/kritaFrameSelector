@@ -1,6 +1,6 @@
 # Frame Selector - Krita Plugin
 
-> **[Leer en Espa\u00f1ol](README_ES.md)**
+> **[Leer en Español](README_ES.md)**
 
 A Krita plugin that lets animators **reuse frames** across the timeline with one click. It analyzes your `.kra` file to detect unique frames, displays them as thumbnail cards, and lets you clone any frame to the current timeline position.
 
