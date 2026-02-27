@@ -17,6 +17,8 @@ from PyQt5.QtCore import Qt, QTimer, QSize
 from .frame_manager import FrameManager
 from .frame_store import FrameStore
 from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE
+from .thumbnail_cache import ThumbnailCache
+from .thumbnail_worker import ThumbnailWorker
 import os
 import zipfile
 
@@ -58,6 +60,15 @@ class FrameSelectorDocker(DockWidget):
         self._refresh_timer.setSingleShot(True)
         self._refresh_timer.setInterval(300)
         self._refresh_timer.timeout.connect(self._on_context_changed)
+
+        # Phase 2: shared thumbnail repository
+        self._thumbnail_cache = ThumbnailCache()
+
+        # Phase 3: async sequential loader (Producer-Consumer)
+        self._thumbnail_worker = ThumbnailWorker(
+            self._frame_manager, self._thumbnail_cache, parent=self
+        )
+        self._thumbnail_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
 
         self._build_ui()
 
@@ -157,6 +168,7 @@ class FrameSelectorDocker(DockWidget):
         self._update_context()
 
         if not self._has_valid_context():
+            self._thumbnail_worker.cancel()
             self._lbl_layer.setText("No document open")
             self._btn_refresh.setEnabled(False)
             self._btn_clear.setEnabled(False)
@@ -175,7 +187,15 @@ class FrameSelectorDocker(DockWidget):
     # ─── Grid ─────────────────────────────────────────────────────
 
     def _reload_grid(self):
-        """Reload the grid from the persistent store."""
+        """Reload the grid from the persistent store.
+
+        Three-phase approach:
+          1. Cancel any in-flight worker job.
+          2. Populate all card items instantly; serve cached thumbnails
+             immediately so the grid looks correct without waiting.
+          3. Hand uncached frames to ThumbnailWorker for async loading.
+        """
+        self._thumbnail_worker.cancel()
         self._frame_grid.clear()
 
         if not self._has_valid_context():
@@ -186,8 +206,7 @@ class FrameSelectorDocker(DockWidget):
         )
 
         if not frames:
-            self._set_status(
-                "No frames loaded · Click 'Refresh' to scan")
+            self._set_status("No frames loaded · Click 'Refresh' to scan")
             return
 
         for frame_number in frames:
@@ -200,16 +219,27 @@ class FrameSelectorDocker(DockWidget):
             item.setData(Qt.UserRole, frame_number)
             item.setSizeHint(QSize(CARD_SIZE, CARD_SIZE))
 
-            thumbnail = self._frame_manager.get_frame_thumbnail(frame_number)
-            if thumbnail:
-                item.setData(Qt.DecorationRole, thumbnail)
+            # Serve from cache immediately — no wait needed
+            cached = self._thumbnail_cache.get(
+                self._current_doc_name, self._current_layer_id, frame_number
+            )
+            if cached:
+                item.setData(Qt.DecorationRole, cached)
 
             self._frame_grid.addItem(item)
 
-        current_time = self._frame_manager.get_current_time()
-        self._set_status(
-            f"{len(frames)} unique frames · Click to clone"
+        # Queue only the frames that are not yet cached
+        self._thumbnail_worker.request_thumbnails(
+            self._current_doc_name, self._current_layer_id, frames
         )
+
+    def _on_thumbnail_ready(self, frame_number: int, pixmap):
+        """Slot: called by ThumbnailWorker when a thumbnail is generated."""
+        for i in range(self._frame_grid.count()):
+            item = self._frame_grid.item(i)
+            if item and item.data(Qt.UserRole) == frame_number:
+                item.setData(Qt.DecorationRole, pixmap)
+                break
 
     # ─── Actions ──────────────────────────────────────────────────
 
@@ -279,8 +309,10 @@ class FrameSelectorDocker(DockWidget):
             self._set_status("No content frames found (all empty?)", "#e8a838")
             return
 
-        # 3. Update Store
-        # Clear old frames
+        # 3. Update Store — drop stale thumbnails before rebuilding
+        self._thumbnail_cache.invalidate(
+            self._current_doc_name, self._current_layer_id
+        )
         self._frame_store.clear_frames(
             self._current_doc_name, self._current_layer_id
         )
@@ -308,6 +340,7 @@ class FrameSelectorDocker(DockWidget):
         if not self._has_valid_context():
             return
 
+        self._thumbnail_worker.cancel()
         self._frame_store.clear_frames(
             self._current_doc_name, self._current_layer_id
         )
@@ -327,6 +360,14 @@ class FrameSelectorDocker(DockWidget):
                 f"Already at frame {frame_number} — move the playhead first",
                 "#e8a838"
             )
+            return
+
+        if self._frame_manager.is_frame_content_empty(frame_number):
+            self._set_status(
+                f"Frame {frame_number} is empty — auto-refreshing…",
+                "#e8a838"
+            )
+            self._on_refresh_frames()
             return
 
         success = self._frame_manager.clone_frame_to_position(

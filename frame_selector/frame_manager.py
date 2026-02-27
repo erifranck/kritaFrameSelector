@@ -9,8 +9,9 @@ Frame registration/persistence is handled by FrameStore.
 
 from krita import Krita, Document, Node
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QSize
-from .krita_parser import KritaParser  # Importamos nuestro nuevo parser
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtWidgets import QApplication
+from .krita_parser import KritaParser
 import os
 
 
@@ -107,8 +108,10 @@ class FrameManager:
         """
         Generate a thumbnail for a specific frame.
 
-        Temporarily navigates to the frame, captures pixel data,
-        and restores the original position.
+        Navigates to the frame, forces a projection refresh so Krita's
+        rendering engine catches up before reading pixel data.
+
+        Caching is handled externally by ThumbnailCache / ThumbnailWorker.
         """
         doc = self.active_document
         node = self.active_node
@@ -120,6 +123,10 @@ class FrameManager:
 
         try:
             doc.setCurrentTime(frame_number)
+            # Force Krita's rendering pipeline to update for the new time
+            # before we read pixel data — without this the projection is stale.
+            doc.refreshProjection()
+            QApplication.processEvents()
 
             bounds = node.bounds()
             if bounds.isEmpty():
@@ -140,14 +147,39 @@ class FrameManager:
                 QImage.Format_ARGB32
             )
 
-            scaled = image.scaled(
-                target_size,
-                1,  # Qt.KeepAspectRatio
-                1   # Qt.SmoothTransformation
+            if image.isNull():
+                return None
+
+            return QPixmap.fromImage(
+                image.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
 
-            return QPixmap.fromImage(scaled)
+        except Exception as e:
+            print(f"[FrameSelector] Thumbnail error for frame {frame_number}: {e}")
+            return None
 
+        finally:
+            doc.setCurrentTime(original_time)
+
+    def is_frame_content_empty(self, frame_number: int) -> bool:
+        """Return True if the active layer has no content at frame_number.
+
+        Uses a lightweight bounds check (no pixel data read) to decide
+        whether the frame is blank or missing before attempting a clone.
+        """
+        doc = self.active_document
+        node = self.active_node
+        if not doc or not node:
+            return True
+
+        original_time = doc.currentTime()
+        try:
+            doc.setCurrentTime(frame_number)
+            doc.refreshProjection()
+            QApplication.processEvents()
+            return node.bounds().isEmpty()
+        except Exception:
+            return True
         finally:
             doc.setCurrentTime(original_time)
 
