@@ -10,7 +10,7 @@ from krita import DockWidget
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QLabel,
-    QPushButton, QApplication,
+    QPushButton, QApplication, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer, QSize
 
@@ -20,6 +20,7 @@ from .frame_thumbnail_delegate import FrameCardDelegate, CARD_SIZE
 from .thumbnail_cache import ThumbnailCache
 from .thumbnail_worker import ThumbnailWorker
 from .drawing_monitor import DrawingMonitor
+from .timeline_debugger import TimelineDebugger
 
 
 class FrameSelectorDocker(DockWidget):
@@ -515,6 +516,33 @@ class FrameSelectorDocker(DockWidget):
             )
             self._on_refresh_frames()
             return
+
+        # --- TIMELINE SYNC VALIDATION ---
+        # Prevent Krita from cloning into the wrong layer if the user clicked
+        # a different layer in the Timeline vs the Layers Panel.
+        timeline_validation = TimelineDebugger.validate_clone_target()
+        
+        # We only block if we successfully retrieved a timeline selection
+        # and it definitively does NOT match the active layer row.
+        # (If timeline_validation['match'] is False but timeline_info['selection'] is None, 
+        # it just means the timeline panel isn't focused/open, which is safe).
+        if not timeline_validation.get('match', True) and timeline_validation.get('timeline_layer_info') is not None:
+            active_name = self._current_layer_name or "Unknown"
+            timeline_name = timeline_validation.get('timeline_layer_info', {}).get('layer_name_guess', 'another layer')
+            
+            QMessageBox.warning(
+                self,
+                "Timeline Selection Mismatch",
+                f"Cannot clone frame safely.\n\n"
+                f"You have '{active_name}' selected in the Layers panel, "
+                f"but you clicked on '{timeline_name}' in the Animation Timeline.\n\n"
+                f"Krita's native clone system will paste into the Timeline's selection, "
+                f"which would destroy frames on '{timeline_name}'.\n\n"
+                f"Please click on '{active_name}' inside the Animation Timeline to sync them, then try again."
+            )
+            self._set_status("Clone aborted: Timeline mismatch", "#e85555")
+            return
+        # --------------------------------
 
         success = self._frame_manager.clone_frame_to_position(
             frame_number, current_time
