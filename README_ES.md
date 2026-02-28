@@ -14,9 +14,9 @@ Un plugin para Krita que permite a los animadores **reutilizar frames** a lo lar
 
 ---
 
-## \u00bfPor qu\u00e9 Frame Selector?
+## ¿Por que Frame Selector?
 
-Si alguna vez animaste en Krita, conoc\u00e9s el dolor:
+Si alguna vez animaste en Krita, conoces el dolor:
 
 - **Lip sync**: Los personajes repiten formas de boca (A, E, O, cerrada) decenas de veces. Sin clonaci\u00f3n, estar\u00edas duplicando datos de p\u00edxeles por cada frame individual.
 - **Ciclos de caminata/corrida**: Reutiliz\u00e1 las mismas posiciones de piernas en un loop sin copiar frames manualmente.
@@ -69,11 +69,11 @@ chmod +x install.sh
 
 El script auto-detecta tu sistema operativo (macOS, Linux, Windows/MSYS) y copia los archivos del plugin al directorio correcto de Krita:
 
-| SO      | Ruta por defecto                                |
-| ------- | ----------------------------------------------- |
-| macOS   | `~/Library/Application Support/krita/pykrita`   |
-| Linux   | `~/.local/share/krita/pykrita`                  |
-| Windows | `%APPDATA%/krita/pykrita`                       |
+| SO      | Ruta por defecto                              |
+| ------- | --------------------------------------------- |
+| macOS   | `~/Library/Application Support/krita/pykrita` |
+| Linux   | `~/.local/share/krita/pykrita`                |
+| Windows | `%APPDATA%/krita/pykrita`                     |
 
 Tambi\u00e9n pod\u00e9s pasar una ruta personalizada:
 
