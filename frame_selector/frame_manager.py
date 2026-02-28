@@ -9,8 +9,9 @@ Frame registration/persistence is handled by FrameStore.
 
 from krita import Krita, Document, Node
 from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QSize
-from .krita_parser import KritaParser  # Importamos nuestro nuevo parser
+from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtWidgets import QApplication
+from .krita_parser import KritaParser
 import os
 
 
@@ -103,16 +104,54 @@ class FrameManager:
         parser = KritaParser(file_path)
         return parser.get_layer_clones()
 
-    def get_frame_thumbnail(self, frame_number: int, size: QSize = None) -> QPixmap | None:
+    def get_node_by_uuid(self, uuid: str) -> "Node | None":
+        """Find any node in the document by its UUID string.
+
+        Comparison is normalised (braces stripped, lowercase) so that UUIDs
+        from the Krita API (e.g. '{AbCd...}') always match those read from
+        the .kra XML (e.g. '{abcd...}'), regardless of casing or brace style.
+        """
+        doc = self.active_document
+        if not doc:
+            return None
+
+        target = uuid.strip("{}").lower()
+
+        def _find(node):
+            if node.uniqueId().toString().strip("{}").lower() == target:
+                return node
+            for child in node.childNodes():
+                result = _find(child)
+                if result:
+                    return result
+            return None
+
+        return _find(doc.rootNode())
+
+    def get_frame_thumbnail(
+        self, frame_number: int, node=None, size: QSize = None
+    ) -> "QPixmap | None":
         """
         Generate a thumbnail for a specific frame.
 
-        Temporarily navigates to the frame, captures pixel data,
-        and restores the original position.
+        Navigates to the frame then polls Krita's projection in a retry loop
+        until the node reports non-empty bounds — without this the projection
+        is often stale on the first processEvents() call, producing a blank
+        thumbnail (shown as '?' in the grid).
+
+        Args:
+            frame_number: Timeline position to capture.
+            node:         Layer node to capture. Defaults to the active node.
+            size:         Output size. Defaults to THUMBNAIL_SIZE.
+
+        Caching is handled externally by ThumbnailCache / ThumbnailWorker.
         """
         doc = self.active_document
-        node = self.active_node
-        if not doc or not node:
+        if not doc:
+            return None
+
+        target_node = node if node is not None else self.active_node
+        if not target_node:
             return None
 
         target_size = size or THUMBNAIL_SIZE
@@ -121,11 +160,23 @@ class FrameManager:
         try:
             doc.setCurrentTime(frame_number)
 
-            bounds = node.bounds()
-            if bounds.isEmpty():
+            # Poll until Krita's rendering pipeline delivers valid bounds.
+            # One processEvents() call is not enough for some frames — we
+            # keep refreshing until bounds become non-empty or we give up.
+            MAX_RETRIES = 12
+            bounds = None
+            for _ in range(MAX_RETRIES):
+                doc.refreshProjection()
+                QApplication.processEvents()
+                b = target_node.bounds()
+                if not b.isEmpty():
+                    bounds = b
+                    break
+
+            if bounds is None:
                 return None
 
-            pixel_data = node.projectionPixelData(
+            pixel_data = target_node.projectionPixelData(
                 bounds.x(), bounds.y(),
                 bounds.width(), bounds.height()
             )
@@ -140,14 +191,39 @@ class FrameManager:
                 QImage.Format_ARGB32
             )
 
-            scaled = image.scaled(
-                target_size,
-                1,  # Qt.KeepAspectRatio
-                1   # Qt.SmoothTransformation
+            if image.isNull():
+                return None
+
+            return QPixmap.fromImage(
+                image.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
 
-            return QPixmap.fromImage(scaled)
+        except Exception as e:
+            print(f"[FrameSelector] Thumbnail error for frame {frame_number}: {e}")
+            return None
 
+        finally:
+            doc.setCurrentTime(original_time)
+
+    def is_frame_content_empty(self, frame_number: int) -> bool:
+        """Return True if the active layer has no content at frame_number.
+
+        Uses a lightweight bounds check (no pixel data read) to decide
+        whether the frame is blank or missing before attempting a clone.
+        """
+        doc = self.active_document
+        node = self.active_node
+        if not doc or not node:
+            return True
+
+        original_time = doc.currentTime()
+        try:
+            doc.setCurrentTime(frame_number)
+            doc.refreshProjection()
+            QApplication.processEvents()
+            return node.bounds().isEmpty()
+        except Exception:
+            return True
         finally:
             doc.setCurrentTime(original_time)
 
