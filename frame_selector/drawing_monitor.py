@@ -27,7 +27,7 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 
 POLL_MS = 1_000   # how often to sample the document composite
-IDLE_MS = 10_000   # how long to wait after the last detected change
+IDLE_MS = 5_000   # how long to wait after the last detected change
 
 
 class DrawingMonitor(QObject):
