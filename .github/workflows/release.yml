@@ -39,33 +39,27 @@ jobs:
           echo "${COMMITS}"
           echo "---"
           
-          # Determine bump type based on conventional commits or custom format
-          # Supports: feat:, fix:, Add(*):, Fix(*):, etc.
-          BUMP_TYPE="patch"
-          
           # Check for breaking changes first (highest priority)
           if echo "${COMMITS}" | grep -qiE "BREAKING CHANGE|!:"; then
-            BUMP_TYPE="major"
+            echo "bump_type=major" >> $GITHUB_OUTPUT
             echo "Type: MAJOR (breaking change detected)"
           # Check for new features (feat: or Add with feature/context)
           elif echo "${COMMITS}" | grep -qiE "^feat:|^Add\("; then
-            BUMP_TYPE="minor"
+            echo "bump_type=minor" >> $GITHUB_OUTPUT
             echo "Type: MINOR (new feature)"
           # Check for bug fixes (fix: or Fix with context)
           elif echo "${COMMITS}" | grep -qiE "^fix:|^Fix\("; then
-            BUMP_TYPE="patch"
+            echo "bump_type=patch" >> $GITHUB_OUTPUT
             echo "Type: PATCH (bug fix)"
           else
-            # Default to minor for additive changes if no clear fix
-            BUMP_TYPE="minor"
+            # Default to minor for additive changes
+            echo "bump_type=minor" >> $GITHUB_OUTPUT
             echo "Type: MINOR (default for new changes)"
           fi
-          
-          echo "bump_type=${BUMP_TYPE}" >> $GITHUB_OUTPUT
 
       - name: Calculate New Version
         id: version
-        if: steps.release.outputs.bump_type != 'none'
+        if: steps.release.outputs.bump_type != ''
         run: |
           CURRENT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           VERSION=${CURRENT_TAG#v}
@@ -90,22 +84,17 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "Current: ${CURRENT_TAG} -> New: ${NEW_VERSION}"
 
-      - name: Build ZIP
-        if: steps.release.outputs.bump_type != 'none'
-        run: |
-          chmod +x build_zip.sh
-          ./build_zip.sh frame_selector.zip
-
       - name: Generate Release Notes
-        if: steps.release.outputs.bump_type != 'none'
+        if: steps.release.outputs.bump_type != ''
         id: notes
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          NEW_VERSION=${{ steps.version.outputs.new_version }}
           
           # Generate changelog from commits
           CHANGES=$(git log ${LAST_TAG}..HEAD --format="- %s" 2>/dev/null | sed 's/^[a-f0-9]* //')
           
-          # Determine type
+          # Determine type emoji
           BUMP=${{ steps.release.outputs.bump_type }}
           if [ "$BUMP" = "major" ]; then
             TYPE="⚠️ MAJOR"
@@ -115,21 +104,18 @@ jobs:
             TYPE="🔧 PATCH"
           fi
           
-          NOTES="$TYPE Release - ${{ steps.version.outputs.new_version }}
-          
-          ## What's New
-          
-          $CHANGES
-          
-          ---
-          *Generated automatically from commit history*"
-          
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Output as JSON to avoid YAML multiline issues
+          NOTES=$(printf '%s Release - %s\n\n## What'"'"'s New\n\n%s\n\n---\n*Automatically generated from commit history*' "$TYPE" "$NEW_VERSION" "$CHANGES")
+          echo "notes=$NOTES" >> $GITHUB_OUTPUT
+
+      - name: Build ZIP
+        if: steps.release.outputs.bump_type != ''
+        run: |
+          chmod +x build_zip.sh
+          ./build_zip.sh frame_selector.zip
 
       - name: Create Release
-        if: steps.release.outputs.bump_type != 'none'
+        if: steps.release.outputs.bump_type != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -146,6 +132,6 @@ jobs:
             frame_selector.zip
 
       - name: No Release Needed
-        if: steps.release.outputs.bump_type == 'none'
+        if: steps.release.outputs.bump_type == ''
         run: |
           echo "No commits requiring release found. Skipping."
