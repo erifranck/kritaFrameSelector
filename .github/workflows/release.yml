@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
 
 jobs:
   release:
@@ -14,14 +14,138 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Determine Release Type
+        id: release
+        run: |
+          # Get commits since last release tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          COMMITS=$(git log ${LAST_TAG}..HEAD --oneline --format="%s")
+          
+          echo "Last tag: ${LAST_TAG}"
+          echo "Commits since last release:"
+          echo "${COMMITS}"
+          echo "---"
+          
+          # Determine bump type based on conventional commits or custom format
+          # Supports: feat:, fix:, Add(*):, Fix(*):, etc.
+          BUMP_TYPE="patch"
+          
+          # Check for breaking changes first (highest priority)
+          if echo "${COMMITS}" | grep -qiE "BREAKING CHANGE|!:"; then
+            BUMP_TYPE="major"
+            echo "Type: MAJOR (breaking change detected)"
+          # Check for new features (feat: or Add with feature/context)
+          elif echo "${COMMITS}" | grep -qiE "^feat:|^Add\("; then
+            BUMP_TYPE="minor"
+            echo "Type: MINOR (new feature)"
+          # Check for bug fixes (fix: or Fix with context)
+          elif echo "${COMMITS}" | grep -qiE "^fix:|^Fix\("; then
+            BUMP_TYPE="patch"
+            echo "Type: PATCH (bug fix)"
+          else
+            # Default to minor for additive changes if no clear fix
+            BUMP_TYPE="minor"
+            echo "Type: MINOR (default for new changes)"
+          fi
+          
+          echo "bump_type=${BUMP_TYPE}" >> $GITHUB_OUTPUT
+
+      - name: Calculate New Version
+        id: version
+        if: steps.release.outputs.bump_type != 'none'
+        run: |
+          CURRENT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          VERSION=${CURRENT_TAG#v}
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+          PATCH=$(echo $VERSION | cut -d. -f3)
+          
+          BUMP=${{ steps.release.outputs.bump_type }}
+          
+          if [ "$BUMP" = "major" ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif [ "$BUMP" = "minor" ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "Current: ${CURRENT_TAG} -> New: ${NEW_VERSION}"
 
       - name: Build ZIP
+        if: steps.release.outputs.bump_type != 'none'
         run: |
           chmod +x build_zip.sh
           ./build_zip.sh frame_selector.zip
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: frame_selector.zip
-          generate_release_notes: true
+      - name: Generate Release Notes
+        if: steps.release.outputs.bump_type != 'none'
+        id: notes
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          
+          # Generate changelog from commits
+          CHANGES=$(git log ${LAST_TAG}..HEAD --format="- %s" 2>/dev/null | sed 's/^[a-f0-9]* //')
+          
+          # Determine type
+          BUMP=${{ steps.release.outputs.bump_type }}
+          if [ "$BUMP" = "major" ]; then
+            TYPE="⚠️ MAJOR"
+          elif [ "$BUMP" = "minor" ]; then
+            TYPE="✨ MINOR"
+          else
+            TYPE="🔧 PATCH"
+          fi
+          
+          NOTES="$TYPE Release - ${{ steps.version.outputs.new_version }}
+          
+          ## What's New
+          
+          $CHANGES
+          
+          ---
+          *Generated automatically from commit history*"
+          
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: steps.release.outputs.bump_type != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${{ steps.version.outputs.new_version }}
+          
+          # Create tag
+          git tag $TAG
+          git push origin $TAG
+          
+          # Create release with generated notes
+          gh release create $TAG \
+            --title "$TAG Release" \
+            --notes "${{ steps.notes.outputs.notes }}" \
+            frame_selector.zip
+
+      - name: No Release Needed
+        if: steps.release.outputs.bump_type == 'none'
+        run: |
+          echo "No commits requiring release found. Skipping."
