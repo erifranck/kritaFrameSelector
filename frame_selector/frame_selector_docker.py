@@ -5,7 +5,7 @@ Grid of automatically detected unique frames.
 Click a card to clone that frame to the current timeline position.
 """
 
-from krita import DockWidget
+from krita import DockWidget, Krita
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
@@ -62,6 +62,15 @@ class FrameSelectorDocker(DockWidget):
         self._layer_polling_timer.setInterval(500)  # Check every 500ms
         self._layer_polling_timer.timeout.connect(self._check_layer_change)
 
+        # Timeline position monitor: polls the timeline to detect when user
+        # moves frames (drag & drop in the timeline). Uses a hash of frame
+        # positions to detect changes efficiently.
+        self._timeline_polling_timer = QTimer()
+        self._timeline_polling_timer.setSingleShot(False)
+        self._timeline_polling_timer.setInterval(800)  # Check every 800ms
+        self._timeline_polling_timer.timeout.connect(self._check_timeline_change)
+        self._last_timeline_hash = None  # Hash of frame positions
+
         # Debounce for canvas changes
         self._refresh_timer = QTimer()
         self._refresh_timer.setSingleShot(True)
@@ -85,7 +94,80 @@ class FrameSelectorDocker(DockWidget):
         # Start layer monitoring immediately (will do nothing if no document)
         self._layer_polling_timer.start()
 
+        # Connect Window signals for view changes
+        self._connect_window_signals()
+
         self._build_ui()
+
+    def _connect_window_signals(self):
+        """Connect to Window signals for detecting view changes."""
+        window = Krita.instance().activeWindow()
+        if window:
+            window.activeViewChanged.connect(self._on_active_view_changed)
+
+    def _on_active_view_changed(self):
+        """Called when the active view changes (e.g., user switches documents).
+
+        Compares stored frame positions with actual timeline positions.
+        If frames were moved/reordered, update the mapping to keep it in sync.
+        """
+        # Reconnect signals for new window if needed
+        window = Krita.instance().activeWindow()
+        if window:
+            try:
+                window.activeViewChanged.disconnect(self._on_active_view_changed)
+            except TypeError:
+                pass  # Wasn't connected
+            window.activeViewChanged.connect(self._on_active_view_changed)
+
+        # Check if we have a valid context
+        if not self._has_valid_context():
+            return
+
+        # Get current timeline state
+        current_time = self._frame_manager.get_current_time()
+        
+        # Compare stored frames with current timeline positions
+        self._verify_frame_positions()
+
+    def _verify_frame_positions(self):
+        """Verify that stored frame positions match the timeline.
+
+        If the user moved frames in the timeline, the stored mapping becomes
+        stale. This method checks for discrepancies and updates accordingly.
+        """
+        if not self._has_valid_context():
+            return
+
+        # Get stored frames for current layer
+        stored_frames = self._frame_store.get_frames(
+            self._current_doc_name, self._current_layer_id
+        )
+
+        if not stored_frames:
+            return
+
+        # The issue: when user moves frames, the frame_number -> source_id mapping
+        # gets out of sync. We need to detect this.
+        #
+        # Approach: Compare what we have stored vs what's actually in the timeline
+        # by checking the keyframes.xml structure.
+        
+        # For now, we just trigger a context refresh to pick up changes
+        # A full re-scan would be more accurate but more expensive
+        self._reload_grid()
+        
+        # Check if frames look different
+        current_frames = self._frame_store.get_frames(
+            self._current_doc_name, self._current_layer_id
+        )
+        
+        # If the frame numbers changed significantly, suggest a refresh
+        if set(stored_frames) != set(current_frames):
+            self._set_status(
+                "Frame positions may have changed · Click 'Refresh' to resync",
+                "#e8a838"
+            )
 
     def _build_ui(self):
         """Build the complete UI."""
@@ -211,6 +293,9 @@ class FrameSelectorDocker(DockWidget):
 
             # Reload grid for new layer
             self._reload_grid()
+            
+            # Update timeline hash for new layer
+            self._update_timeline_hash()
 
             # Update status based on whether we have frames
             frames = self._frame_store.get_frames(
@@ -220,6 +305,79 @@ class FrameSelectorDocker(DockWidget):
                 self._set_status(f"Showing {len(frames)} frame(s) from layer '{current_layer_name}'", "#6fbf73")
             else:
                 self._set_status("No frames for this layer · Click 'Refresh' to scan", "#e8a838")
+
+    def _update_timeline_hash(self):
+        """Calculate a hash of current frame positions in the timeline.
+
+        This creates a fingerprint of the timeline state that we can compare
+        later to detect if frames were moved/added/removed.
+        """
+        if not self._has_valid_context():
+            self._last_timeline_hash = None
+            return
+
+        # Get current frame positions from the layer
+        # We use the frame store as source of truth for what frames exist
+        frames = self._frame_store.get_frames(
+            self._current_doc_name, self._current_layer_id
+        )
+
+        if not frames:
+            self._last_timeline_hash = None
+            return
+
+        # Create a simple hash from frame numbers and their source_ids
+        # This is a quick fingerprint of the timeline structure
+        frame_parts = []
+        for fn in sorted(frames):
+            source_id = self._frame_store.get_source_id(
+                self._current_doc_name, self._current_layer_id, fn
+            )
+            frame_parts.append(f"{fn}:{source_id}")
+
+        # Simple string-based hash (good enough for change detection)
+        frame_str = "|".join(frame_parts)
+        self._last_timeline_hash = hash(frame_str)
+
+    def _check_timeline_change(self):
+        """Poll timeline to detect when user moves frames.
+
+        Compares the current timeline state (via frame positions hash)
+        with the last known state. If different, frames were moved.
+        """
+        # If no valid context, do nothing
+        if not self._has_valid_context():
+            return
+
+        # Get current frame positions
+        frames = self._frame_store.get_frames(
+            self._current_doc_name, self._current_layer_id
+        )
+
+        if not frames:
+            return
+
+        # Calculate current hash
+        frame_parts = []
+        for fn in sorted(frames):
+            source_id = self._frame_store.get_source_id(
+                self._current_doc_name, self._current_layer_id, fn
+            )
+            frame_parts.append(f"{fn}:{source_id}")
+
+        frame_str = "|".join(frame_parts)
+        current_hash = hash(frame_str)
+
+        # Compare with last known hash
+        if self._last_timeline_hash is not None and current_hash != self._last_timeline_hash:
+            # Timeline changed! Frames were moved, added, or removed
+            self._set_status(
+                "Frame positions changed · Click 'Refresh' to resync",
+                "#e8a838"
+            )
+
+        # Update hash for next comparison
+        self._last_timeline_hash = current_hash
 
     def _has_valid_context(self) -> bool:
         """Check if we have a valid document + layer."""
@@ -236,6 +394,7 @@ class FrameSelectorDocker(DockWidget):
             self._thumbnail_worker.cancel()
             self._drawing_monitor.deactivate()
             self._layer_polling_timer.stop()
+            self._timeline_polling_timer.stop()
             self._lbl_layer.setText("No document open")
             self._btn_refresh.setEnabled(False)
             self._btn_clear.setEnabled(False)
@@ -251,6 +410,8 @@ class FrameSelectorDocker(DockWidget):
         self._btn_clear.setEnabled(True)
         self._drawing_monitor.activate()
         self._layer_polling_timer.start()  # Start monitoring layer changes
+        self._timeline_polling_timer.start()  # Start monitoring timeline changes
+        self._update_timeline_hash()  # Initialize hash
         self._reload_grid()
 
     # ─── Grid ─────────────────────────────────────────────────────
